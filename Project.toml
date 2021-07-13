@@ -1,0 +1,13 @@
+name = "ARCTools"
+uuid = "063c1ca3-2ea3-42c9-87e4-d0b9a978e988"
+authors = ["Jonathan Doucette <jdoucette@phas.ubc.ca> and contributors"]
+version = "0.1.0"
+
+[compat]
+julia = "1"
+
+[extras]
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[targets]
+test = ["Test"]
