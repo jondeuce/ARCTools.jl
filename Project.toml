@@ -3,6 +3,11 @@ uuid = "063c1ca3-2ea3-42c9-87e4-d0b9a978e988"
 authors = ["Jonathan Doucette <jdoucette@phas.ubc.ca> and contributors"]
 version = "0.1.0"
 
+[deps]
+Glob = "c27321d9-0574-5035-807b-f59d2c89b15c"
+Parameters = "d96e819e-fc66-5662-9728-84c9c7592b0a"
+ReadableRegex = "cbbcb084-453d-4c4c-b292-e315607ba6a4"
+
 [compat]
 julia = "1"
 
