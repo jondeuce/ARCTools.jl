@@ -4,33 +4,90 @@ using Glob
 using Parameters
 using ReadableRegex
 
+export Resources
 export QSub, qsub
 export JuliaCmd, JuliaJob
 
 #### QSub
 
+const Maybe{T} = Union{T, Nothing}
+
+"""
+https://confluence.it.ubc.ca/display/UARC/Running+Jobs
+"""
+@with_kw struct Resources
+    walltime::Maybe{String} = nothing
+    select::Maybe{Int} = nothing
+    ncpus::Maybe{Int} = nothing
+    ngpus::Maybe{Int} = nothing
+    mpiprocs::Maybe{Int} = nothing
+    ompthreads::Maybe{Int} = ncpus
+    mem::Maybe{Int} = nothing
+    gpu_mem::Maybe{Int} = nothing
+end
+
+function resource_string(r::Resources, prop::Symbol)
+    val = getfield(r, prop)
+    units = (prop === :mem || prop === :gpu_mem) ? "gb" : ""
+    sep = (prop === :walltime) ? "," : ":"
+    val === nothing ? "" : "$(prop)=$(val)$(units)$(sep)"
+end
+
+function resource_list(r::Resources)
+    r_list = ""
+    for prop in [
+            # Note: order matters here for :walltime and :select
+            :walltime,
+            :select,
+            :ncpus,
+            :ngpus,
+            :mpiprocs,
+            :ompthreads,
+            :mem,
+            :gpu_mem,
+        ]
+        r_list *= resource_string(r, prop)
+    end
+
+    # Return resource list, removing trailing separator
+    @assert !isempty(r_list)
+    r_list[begin:end-1]
+end
+
+#### QSub
+
 @with_kw struct QSub
+    resources::Resources
     modules::Vector{String}
     account::String
     jobname::String
-    walltime::String
-    select::Int
-    ncpus::Int
-    ompthreads::Int
-    mem::Int
     stdout::String
     stderr::String
+    interactive::Bool = false
+    X11forwarding::Bool = interactive
+    @assert !(X11forwarding && !interactive) "X11 forwarding requires interactive=true"
 end
 
 function pbs_header(q::QSub)
+    pbs_directives = Any[
+        "#PBS -l $(resource_list(q.resources))",
+        "#PBS -A $(q.account)",
+        "#PBS -N $(q.jobname)",
+        "#PBS -o $(q.stdout)",
+        "#PBS -e $(q.stderr)",
+        "#PBS -j oe",
+    ]
+    if q.interactive
+        push!(pbs_directives, "#PBS -I")
+        push!(pbs_directives, "#PBS -q interactive_$(q.resources.ngpus !== nothing ? "gpu" : "cpu")")
+    end
+    if q.X11forwarding
+        push!(pbs_directives, "#PBS -X")
+    end
+
     """
     #!/bin/bash
-    #PBS -l walltime=$(q.walltime),select=$(q.select):ncpus=$(q.ncpus):ompthreads=$(q.ompthreads):mem=$(q.mem)gb
-    #PBS -A $(q.account)
-    #PBS -N $(q.jobname)
-    #PBS -o $(q.stdout)
-    #PBS -e $(q.stderr)
-    #PBS -j oe
+    $(join(pbs_directives, "\n"))
 
     # Load modules
     $(join(["module load $mod" for mod in q.modules], "\n"))
@@ -52,6 +109,7 @@ end
 @with_kw struct JuliaCmd
     dir::String = "."
     env::Vector{Pair{String,String}} = []
+    secrets::Vector{String} = []
     bin::String = ""
     flags::Vector{String} = []
     script::String
@@ -59,6 +117,9 @@ end
 end
 
 function bash_commands(jl::JuliaCmd)
+    envfile = logfile(JuliaJob(), jl.dir, jl.script, "env.toml")
+    julia = join([joinpath(jl.bin, "julia"); jl.flags], " ")
+
     """
     # Ensure working directory path exists
     mkdir -p $(jl.dir)
@@ -67,8 +128,15 @@ function bash_commands(jl::JuliaCmd)
     # Set environment variables
     $(join(["export $k=$v" for (k,v) in jl.env], "\n"))
 
+    # Log environment variables
+    $(julia) -e 'using TOML; TOML.print(ENV)' | sort -h $(
+        isempty(jl.secrets) ?
+            "> $(envfile)" :
+            "| grep -Ev '^($(join(collect(jl.secrets), "|")))' > $(envfile)"
+    )
+
     # Run julia script
-    $(join([joinpath(jl.bin, "julia"); jl.flags; jl.script; jl.args], " "))
+    $(join([julia; jl.script; "--"; jl.args], " "))
     """
 end
 
@@ -76,47 +144,64 @@ end
 
 struct JuliaJob end
 
+function Base.basename(::JuliaJob, script)
+    @assert endswith(script, ".jl")
+    basename(script)[begin:end-3]
+end
+
+function logfile(::JuliaJob, project, script, suffix)
+    joinpath(
+        mkpath(joinpath(project, "pbs")),
+        basename(JuliaJob(), script) * "_" * suffix,
+    )
+end
+
 function qsub(
         ::JuliaJob;
         # qsub kwargs
+        resources::Resources,
         modules::Vector{String} = [
             "gcc/9.1.0",  # for git/2.21.0
             "git/2.21.0", # for julia 1.6+
             "python/3.7.3",
+            "cuda/10.0.130",
         ],
         account::String,
         jobname::String,
-        walltime::String,
-        select::Int,
-        memory::Int,
+        interactive::Bool = false,
+        X11forwarding::Bool = interactive,
         # julia kwargs
         env::Vector{Pair{String,String}} = Pair{String,String}[],
+        secrets::Vector{String} = String[],
         bin::String,
         project::String,
-        threads::Int,
-        optimize::Int,
+        threads::Int = resources.ncpus,
         script::String,
         args::Vector{String} = [],
     )
     @assert endswith(script, ".jl")
-
-    pbs_file(suffix) = joinpath(
-        mkpath(joinpath(project, "pbs")),
-        basename(script)[1:end-3] * suffix,
-    )
+    logfile_(suffix) = logfile(JuliaJob(), project, script, suffix)
 
     q = QSub(;
-        modules = modules,
-        account = account,
-        jobname = jobname,
-        walltime = walltime,
-        select = select,
-        ncpus = threads,
-        ompthreads = threads,
-        mem = memory,
-        stdout = pbs_file("_stdout.txt"),
-        stderr = pbs_file("_stderr.txt"),
+        resources,
+        modules,
+        account,
+        jobname,
+        stdout = logfile_("stdout.txt"),
+        stderr = logfile_("stderr.txt"),
+        interactive,
+        X11forwarding,
     )
+
+    flags = [
+        "--startup-file=no",
+        "--history-file=no",
+        "--optimize",
+        "--quiet",
+    ]
+    if interactive
+        push!(flags, "-i")
+    end
 
     jl = JuliaCmd(;
         dir = project,
@@ -126,18 +211,15 @@ function qsub(
             "JULIA_PROJECT" => project;
             "JULIA_NUM_THREADS" => string(threads);
         ],
-        bin = bin,
-        flags = [
-            "--startup-file=no",
-            "--history-file=no",
-            "--optimize=$(optimize)",
-        ],
+        secrets,
+        bin,
+        flags,
         script,
         args,
     )
 
     # Write pbs script to file
-    open(pbs_file("_job.pbs"), "w+") do io
+    open(logfile_("job.pbs"), "w+") do io
         print(io,
             """
             $(pbs_header(q))
@@ -146,7 +228,7 @@ function qsub(
         )
     end
 
-    `qsub $(pbs_file("_job.pbs"))`
+    `qsub $(logfile_("job.pbs"))`
 end
 
 end
