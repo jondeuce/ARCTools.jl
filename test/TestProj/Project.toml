@@ -1,0 +1,7 @@
+name = "TestProj"
+uuid = "ea0aa774-3b31-4055-9365-e4719fb308b4"
+authors = ["Jonathan Doucette <jdoucette@phas.ubc.ca>"]
+version = "0.1.0"
+
+[deps]
+Example = "7876af07-990d-54b4-ab0e-23690620f79a"

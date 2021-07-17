@@ -24,7 +24,13 @@ using Test
             "JL_SECRET_VAL2",
         ],
         bin = Sys.BINDIR,
-        project = expanduser("~/TestProj"),
+        project = ARCTools.copy_project(;
+            project = joinpath(@__DIR__, "TestProj"),
+            dest = mktempdir(
+                "/scratch/st-arausch-1/jcd1994";
+                prefix = "TestProj_",
+            ),
+        ),
         script = "./scripts/test_script.jl",
         args = ["Alice", "Bob", "Carol"]
     )

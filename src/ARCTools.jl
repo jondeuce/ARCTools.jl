@@ -231,4 +231,28 @@ function qsub(
     `qsub $(logfile_("job.pbs"))`
 end
 
+#### Copy project
+
+function copy_project(;
+        project,
+        folders = [
+            "src",
+            "scripts",
+        ],
+        dest = mktempdir(),
+    )
+    files = joinpath.(project, [
+        "Project.toml",
+        "Manifest.toml",
+        folders...,
+    ])
+    files = filter(ispath, files)
+
+    for file in files
+        cp(file, joinpath(dest, basename(file)); force=false, follow_symlinks=true)
+    end
+
+    return dest
 end
+
+end # module ARCTools
