@@ -15,7 +15,7 @@ const Maybe{T} = Union{T, Nothing}
 """
 https://confluence.it.ubc.ca/display/UARC/Running+Jobs
 """
-@with_kw struct Resources
+@with_kw mutable struct Resources
     walltime::Maybe{String} = nothing
     select::Maybe{Int} = nothing
     ncpus::Maybe{Int} = nothing
@@ -56,13 +56,13 @@ end
 
 #### QSub
 
-@with_kw struct QSub
+@with_kw mutable struct QSub
     resources::Resources
     modules::Vector{String}
     account::String
     jobname::String
-    stdout::String
-    stderr::String
+    stdout::String = ""
+    stderr::String = ""
     interactive::Bool = false
     X11forwarding::Bool = interactive
     @assert !(X11forwarding && !interactive) "X11 forwarding requires interactive=true"
@@ -106,24 +106,34 @@ end
 
 #### JuliaCmd
 
-@with_kw struct JuliaCmd
-    dir::String = "."
-    env::Vector{Pair{String,String}} = []
-    secrets::Vector{String} = []
-    bin::String = ""
-    flags::Vector{String} = []
+@with_kw mutable struct JuliaCmd
+    bindir::String
+    threads::Int
+    project::String
     script::String
-    args::Vector{String} = []
+    flags::Dict{String, Any} = Dict{String, Any}()
+    args::Vector{String} = String[]
+    env::Dict{String, Any} = Dict{String, Any}()
+    secrets::Vector{String} = String[]
+end
+
+function try_find_julia_bindir()
+    jldir = chomp(read(`which julia`, String)) # path of default julia
+    jldir = chomp(read(`readlink -e $(jldir)`, String)) # follow symlinks
+    bindir = dirname(jldir)
+    @assert isdir(bindir)
+    return bindir
 end
 
 function bash_commands(jl::JuliaCmd)
-    envfile = logfile(JuliaJob(), jl.dir, jl.script, "env.toml")
-    julia = join([joinpath(jl.bin, "julia"); jl.flags], " ")
+    envfile = logfile(JuliaJob(), jl.project, jl.script, "env.toml")
+    flags = [isnothing(v) ? k : "$k=$v" for (k, v) in jl.flags]
+    julia = join([joinpath(jl.bindir, "julia"); flags], " ")
 
     """
-    # Ensure working directory path exists
-    mkdir -p $(jl.dir)
-    cd $(jl.dir)
+    # Ensure project directory path exists
+    mkdir -p $(jl.project)
+    cd $(jl.project)
 
     # Set environment variables
     $(join(["export $k=$v" for (k,v) in jl.env], "\n"))
@@ -157,66 +167,29 @@ function logfile(::JuliaJob, project, script, suffix)
 end
 
 function qsub(
-        ::JuliaJob;
-        # qsub kwargs
-        resources::Resources,
-        modules::Vector{String} = [
-            "gcc/9.1.0",  # for git/2.21.0
-            "git/2.21.0", # for julia 1.6+
-            "python/3.7.3",
-            "cuda/10.0.130",
-        ],
-        account::String,
-        jobname::String,
-        interactive::Bool = false,
-        X11forwarding::Bool = interactive,
-        # julia kwargs
-        env::Vector{Pair{String,String}} = Pair{String,String}[],
-        secrets::Vector{String} = String[],
-        bin::String,
-        project::String,
-        threads::Int = resources.ncpus,
-        script::String,
-        args::Vector{String} = [],
+        q::QSub,
+        jl::JuliaCmd,
     )
-    @assert endswith(script, ".jl")
-    logfile_(suffix) = logfile(JuliaJob(), project, script, suffix)
+    logfile_(suffix) = logfile(JuliaJob(), jl.project, jl.script, suffix)
 
-    q = QSub(;
-        resources,
-        modules,
-        account,
-        jobname,
-        stdout = logfile_("stdout.txt"),
-        stderr = logfile_("stderr.txt"),
-        interactive,
-        X11forwarding,
-    )
+    # Set standard output/standard error log files
+    isempty(q.stdout) && (q.stdout = logfile_("stdout.txt"))
+    isempty(q.stderr) && (q.stderr = logfile_("stderr.txt"))
 
-    flags = [
-        "--startup-file=no",
-        "--history-file=no",
-        "--optimize",
-        "--quiet",
-    ]
-    if interactive
-        push!(flags, "-i")
+    # Default environment
+    get!(jl.env, "JULIA_BINDIR", jl.bindir)
+    get!(jl.env, "JULIA_PROJECT", jl.project)
+    get!(jl.env, "JULIA_NUM_THREADS", jl.threads)
+
+    # Default flags
+    get!(jl.flags, "--startup-file", "no")
+    get!(jl.flags, "--history-file", "no")
+    get!(jl.flags, "--optimize", nothing)
+    get!(jl.flags, "--quiet", nothing)
+
+    if q.interactive
+        get!(jl.flags, "-i", nothing)
     end
-
-    jl = JuliaCmd(;
-        dir = project,
-        env = [
-            env;
-            "JULIA_BINDIR" => bin;
-            "JULIA_PROJECT" => project;
-            "JULIA_NUM_THREADS" => string(threads);
-        ],
-        secrets,
-        bin,
-        flags,
-        script,
-        args,
-    )
 
     # Write pbs script to file
     open(logfile_("job.pbs"), "w+") do io
